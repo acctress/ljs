@@ -1,45 +1,119 @@
 #include <ljs/lexer/lexer.hpp>
 
-std::vector< ljs::lexer::token > ljs::lexer::Lexer::tokenize_all( )
+#include "ljs/error.hpp"
+#include <string_view>
+
+using namespace std::string_view_literals;
+
+std::vector< token > ljs::lexer::Lexer::tokenize_all( )
 {
     std::vector< token > tokens;
 
     do
     {
-        tokens.push_back( next( ) );
+        auto tok = next(  );
+        if ( !tok.has_value(  ) )
+            throw error::LJSErrorBuilder(m_source)
+                .at( m_line, m_column )
+                .span( m_column, m_position - m_column )
+                .of_type( "lexer error" )
+                .with_explanation( "Unable to process token" )
+                .with_hint( "Do you have an illegal token in your source code?" )
+                .build(  );
+
+        tokens.push_back( std::move( tok.value(  ) ) );
     } while ( not_at_end(  ) );
 
     return tokens;
 }
 
-ljs::lexer::token ljs::lexer::Lexer::next( )
+std::optional< token > ljs::lexer::Lexer::next( )
 {
-    if ( !peek(  ).has_value(  ) )
-        throw std::runtime_error(
-            std::format( "Unable to peek current character in source code at position {}.", m_position )
-        );
-
-    const auto current = peek(  ).value(  );
-    switch ( current )
+    while ( not_at_end(  ) )
     {
-        default :
+        if ( const auto current = peek( ).value( );
+            current == ' ' || current == '\t' || current == '\n' || current == '\r' )
+            advance(  );
+        else break;
+    }
+
+    if ( !not_at_end(  ) )
+        return token( token_type::T_EOF, "", m_line, m_column, m_column );
+
+    const auto current = peek( ).value(  );
+
+    if ( std::isalpha( current ) || current == '_' )
+    {
+        const std::size_t start = m_position;
+
+        do
         {
-            if ( std::isalpha( current ) || current == '_' )
+            advance( );
+        } while ( not_at_end( ) && ( std::isalnum( static_cast< unsigned char >( m_source[ m_position ] ) ) || m_source[ m_position ] == '_' ) );
+
+        const std::string_view value { &m_source[ start ], m_position - start };
+        return token { token_type::IDENTIFIER, std::string( value ), m_line, start, m_position };
+    }
+
+    if ( std::isdigit( current ) )
+    {
+        const std::size_t start = m_position;
+        bool is_float { false };
+
+        do
+        {
+            if ( m_source[ m_position ] == '.')
             {
-                const std::size_t start = m_position;
+                if ( is_float )
+                    throw error::LJSErrorBuilder(m_source)
+                        .at( m_line, m_column + 1 )
+                        .span( m_column, m_position - m_column )
+                        .of_type( "syntax error" )
+                        .with_explanation( "Cannot have more than one decimal point in a float." )
+                        .with_hint( "Try removing the extra decimal point in the literal." )
+                        .in_file( "test.js" )
+                        .build(  );
 
-                do
-                {
-                    advance( );
-                } while ( not_at_end( ) && ( std::isalnum( static_cast< unsigned char >( m_source[ m_position ] ) ) || m_source[ m_position ] == '_' ) );
-
-                const std::string_view value { &m_source[ start ], m_position - start };
-                return token { token_type::IDENTIFIER, std::string( value ), m_line, start };
+                is_float = true;
+                advance(  );
             }
 
-            return token( token_type::T_EOF, "", m_line, m_column );
-        }
+            advance(  );
+        } while ( not_at_end( ) && ( std::isdigit( static_cast< unsigned char >( m_source[ m_position ] ) ) || m_source[ m_position ] == '.' ) );
+
+        const std::string_view value { &m_source[ start ], m_position - start };
+        return token { token_type::NUMBER, std::string( value ), m_line, start, m_position };
     }
+
+    if ( current == '"' || current == '\'' )
+    {
+        const std::size_t start = m_position;
+        const char opening_char = current;
+        advance(  );
+
+        do
+        {
+            if ( m_source[ m_position ] == opening_char )
+            {
+                advance(  );
+                const std::string_view value( &m_source[start + 1], &m_source[m_position - 1] - &m_source[start + 1] );
+                return token { token_type::STRING, std::string( value ), m_line, start, m_position };
+            }
+
+            advance( );
+        } while ( not_at_end(  ) );
+
+        throw error::LJSErrorBuilder(m_source)
+              .at(m_line, m_column)
+              .span(start, m_position - start)
+              .of_type("syntax error")
+              .with_explanation(
+                  std::format("Unterminated string literal (missing {}).", opening_char))
+              .with_hint( std::format("Add {} to close the string.", opening_char) )
+              .build();
+    }
+
+    return std::nullopt;
 }
 
 void ljs::lexer::Lexer::advance( )
@@ -79,3 +153,4 @@ bool ljs::lexer::Lexer::not_at_end( ) const
 {
     return m_position < m_source.length(  );
 }
+
